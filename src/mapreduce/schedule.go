@@ -30,5 +30,29 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	//
 	// Your code here (Part III, Part IV).
 	//
+
+	finishChan := make(chan int, ntasks)
+	// treat the serverChan as a ready server pool. when one server finishes its
+	// task, put it back to the pool. thus make sure availiable server is busy
+	// also need to make sure that jobs are finished
+	for i := 0; i < ntasks; i++ {
+		go func (whichTask int) {
+			thisserver := <- registerChan
+			fileArg := ""
+			if phase == mapPhase {
+				fileArg = mapFiles[whichTask]
+			}
+			dotaskArgs := DoTaskArgs{jobName, fileArg, phase, whichTask, n_other}
+			call(thisserver, "Worker.DoTask", dotaskArgs, nil)
+			go func () {registerChan <- thisserver} ()
+			finishChan <- whichTask
+		} (i)
+	}
+	// wait for local channel to finish
+	for i := 0; i < ntasks; i++ {
+		<- finishChan
+	}
+
+
 	fmt.Printf("Schedule: %v done\n", phase)
 }
