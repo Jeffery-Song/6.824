@@ -43,7 +43,13 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 				fileArg = mapFiles[whichTask]
 			}
 			dotaskArgs := DoTaskArgs{jobName, fileArg, phase, whichTask, n_other}
-			call(thisserver, "Worker.DoTask", dotaskArgs, nil)
+			for {
+				succeed := call(thisserver, "Worker.DoTask", dotaskArgs, nil)
+				if succeed == true {
+					break
+				}
+				thisserver = <- registerChan
+			}
 			go func () {registerChan <- thisserver} ()
 			finishChan <- whichTask
 		} (i)
