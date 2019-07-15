@@ -24,8 +24,8 @@ import "math/rand"
 import "sort"
 import "fmt"
 
-// import "bytes"
-// import "labgob"
+import "bytes"
+import "labgob"
 
 // Roles
 const (
@@ -37,12 +37,16 @@ const (
 const leaderCheckDelta int64 = 1e8 // 0.1s
 const leaderStepDownDelta int64 = 3e8
 const electionTimeoutBase int64 = 2e8
-const electionTimeoutRange int64 = 2e8
+const electionTimeoutRange int64 = 6e8
 const heartBeatDelta int64 = 1e8
-const applyCheckDelta int64 = 1e8
+const applyCheckDelta int64 = 2e7
+const maxAppendEntries int = 100
 
 func myDebug(other ...interface{}) {
-	// fmt.Println(other...)
+	/*
+	fmt.Print(time.Now().String()[14:25], " ")
+	fmt.Println(other...) 
+	// */
 	fmt.Print("")
 }
 
@@ -99,7 +103,7 @@ type Raft struct {
 
 	appendNoticeChan chan interface {}
 
-	applyChan      chan ApplyMsg
+	// applyChan      chan ApplyMsg
 }
 
 // GetState :
@@ -120,15 +124,16 @@ func (rf *Raft) GetState() (int, bool) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 //
+// Warn: must call this inside lock!
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	wbuf := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(wbuf)
+	encoder.Encode(rf.currentTerm)
+	encoder.Encode(rf.votedFor)
+	encoder.Encode(rf.log)
+	data := wbuf.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 
@@ -140,18 +145,20 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	rbuf := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(rbuf)
+	var currentTerm int
+	var votedFor int
+	var log []Entry
+	if decoder.Decode(&currentTerm) != nil ||
+	   decoder.Decode(&votedFor) != nil || 
+	   decoder.Decode(&log) != nil {
+	  // error...
+	} else {
+	  rf.currentTerm = currentTerm
+	  rf.votedFor = votedFor
+	  rf.log = log
+	}
 }
 
 func findCommitIndex(matchIndex []int) int {
@@ -203,51 +210,64 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	if rf.currentTerm > args.Term {
-		myDebug(rf.me, " reject voting ", args.CandidateId, " due to local new term ", rf.currentTerm, " and old remote ", args.Term)
+		myDebug(rf.me, "<-", args.CandidateId, " :reject voting due to local new term ", 
+						rf.currentTerm, " and old remote ", args.Term)
 		// I'm newer
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 	} else if rf.currentTerm < args.Term {
 		// grant vote
-		myDebug(rf.me, " receive new term reqVote from ", args.CandidateId, " and move term from ", rf.currentTerm, " to ", args.Term)
+		myDebug(rf.me, "<-", args.CandidateId, " :recv newer term reqVote, move term  ", 
+						rf.currentTerm, " to ", args.Term)
 		rf.currentTerm = args.Term
 		rf.role = Follower
 		rf.leader = -1
 		rf.votedFor = -1
+		// do not start election 
+		// rf.lastLeaderTS = time.Now().UnixNano()
 		
 		localLastIndex := len(rf.log)-1
 		localLastTerm := rf.log[len(rf.log)-1].Term
-		if localLastTerm > args.LastLogTerm || (localLastTerm == args.LastLogTerm && localLastIndex > args.LastLogIndex) {
+		if localLastTerm > args.LastLogTerm || 
+				(localLastTerm == args.LastLogTerm && localLastIndex > args.LastLogIndex) {
 			// reject
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = false
-			myDebug(rf.me, " reject voting ", args.CandidateId, " due to local (", localLastTerm, localLastIndex, ")>(", args.LastLogTerm, args.LastLogIndex, ")")
+			myDebug(rf.me, "<-", args.CandidateId, " :reject voting due to local logs (", 
+							localLastTerm, localLastIndex, ")>(", args.LastLogTerm, args.LastLogIndex, ")")
 		} else {
-			myDebug(rf.me, " grant voting ", args.CandidateId, " due to remote (", args.LastLogTerm, args.LastLogIndex, ")>=(", localLastTerm, localLastIndex, ")")
+			myDebug(rf.me, "<-", args.CandidateId, " :grant voting due to remote logs (", 
+							args.LastLogTerm, args.LastLogIndex, ")>=(", localLastTerm, localLastIndex, ")")
 			// accept
 			rf.votedFor = args.CandidateId
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
 		}
+		rf.persist()
 	} else if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.role == Follower {
-		myDebug(rf.me, " receive reqVote from ", args.CandidateId)
+		myDebug(rf.me, "<-", args.CandidateId, " :recv reqVote, t=", args.Term)
 		// grant vote
 		localLastIndex := len(rf.log)-1
 		localLastTerm := rf.log[len(rf.log)-1].Term
-		if localLastTerm > args.LastLogTerm || (localLastTerm == args.LastLogTerm && localLastIndex > args.LastLogIndex) {
+		if localLastTerm > args.LastLogTerm || 
+				(localLastTerm == args.LastLogTerm && localLastIndex > args.LastLogIndex) {
 			// reject
-			myDebug(rf.me, " reject voting ", args.CandidateId, " due to local (", localLastTerm, localLastIndex, ")>(", args.LastLogTerm, args.LastLogIndex, ")")
+			myDebug(rf.me, "<-", args.CandidateId, " :reject voting due to local logs (", 
+							localLastTerm, localLastIndex, ")>(", args.LastLogTerm, args.LastLogIndex, ")")
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = false
 		} else {
 			// accept
 			rf.votedFor = args.CandidateId
+			rf.persist()
 			reply.Term = rf.currentTerm
+			rf.lastLeaderTS = time.Now().UnixNano()
 			reply.VoteGranted = true
-			myDebug(rf.me, " grant voting ", args.CandidateId, " due to remote (", args.LastLogTerm, args.LastLogIndex, ")>=(", localLastTerm, localLastIndex, ")")
+			myDebug(rf.me, "<-", args.CandidateId, " :grant voting due to remote logs (", 
+							args.LastLogTerm, args.LastLogIndex, ")>=(", localLastTerm, localLastIndex, ")")
 		}
 	} else {
-		myDebug(rf.me, " reject voting ", args.CandidateId, " due to voted or not follower")
+		myDebug(rf.me, "<-", args.CandidateId, " reject voting due to voted or not follower")
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 	}
@@ -285,7 +305,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 
 	if rf.currentTerm > args.Term {
-		myDebug(rf.me, ": heart beat from ", args.LeaderId, " is stale")
+		myDebug(rf.me, "<-", args.LeaderId, ": recved heart beat(", args.Term, ") is stale(", 
+						rf.currentTerm, ")")
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		rf.mu.Unlock()
@@ -303,41 +324,54 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else if rf.currentTerm < args.Term {
 		// catch up the new term
 		rf.votedFor = -1
-		myDebug(rf.me, ": append from ", args.LeaderId, ", move from term ", rf.currentTerm, " to ", args.Term)
+		myDebug(rf.me, "<-", args.LeaderId, " :append, move term from ", 
+						rf.currentTerm, " to ", args.Term)
 		rf.currentTerm = args.Term
 		rf.role = Follower
 		rf.leader = args.LeaderId
+		rf.lastLeaderTS = time.Now().UnixNano()
+		rf.persist()
 	} else {
 		// maybe need to learn the current term's leader, give up election
+		rf.lastLeaderTS = time.Now().UnixNano()
 		rf.role = Follower
 		rf.leader = args.LeaderId
-		myDebug(rf.me, ": append from ", args.LeaderId, ", may step back")
+		myDebug(rf.me, "<-", args.LeaderId, " :append term checked.", 
+						" may give up election in the same term=", args.Term)
 	}
 
 	if args.PrevLogIndex >= len(rf.log) {
 		// i have shorter log
-		myDebug(rf.me, " reject append from ", args.LeaderId, " due to missing logs")
+		myDebug(rf.me, "<-", args.LeaderId, " :reject append due to missing logs, ", 
+						"(pI, localLen)=", args.PrevLogIndex, len(rf.log))
 		reply.Success = false
 	} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		myDebug(rf.me, " reject append from ", args.LeaderId, " due to prev term miss match")
+		myDebug(rf.me, "<-", args.LeaderId, " :reject append due to diff prev term,",
+						" (pI, pT, localTerm)=", args.PrevLogIndex, args.PrevLogTerm, rf.log[args.PrevLogIndex].Term)
 		reply.Success = false
 	} else {
 		if len(args.Entries) != 0 {
-			myDebug(rf.me, " accept append from ", args.LeaderId, "")
+			myDebug(rf.me, "<-", args.LeaderId, " :accept append some entries")
 		}
 		// now update local entries
 		nextEntryToPut := 0
 		nextIndexToPut := args.PrevLogIndex + 1
+		logModified := false
 		// if the nextIndexToPut is already in rf.log, check the term
 		for ; nextIndexToPut < len(rf.log) && nextEntryToPut < len(args.Entries); nextIndexToPut++ {
 			if rf.log[nextIndexToPut].Term != args.Entries[nextEntryToPut].Term {
 				rf.log = rf.log[:nextIndexToPut]
+				logModified = true
+				if rf.committedIndex >= nextIndexToPut {
+					myDebug(rf.me, " bug? a commited index is cutted due to log term mismatch ", rf.committedIndex, nextIndexToPut)
+				}
 				break
 			}
 			nextEntryToPut++
 		}
 		for ; nextEntryToPut < len(args.Entries); nextEntryToPut++ {
 			rf.log = append(rf.log, args.Entries[nextEntryToPut])
+			logModified = true
 		}
 		reply.Success = true
 		if args.LeaderCommit > rf.committedIndex {
@@ -348,6 +382,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				myDebug(rf.me, " catch up committedIndex to ", len(rf.log)-1)
 				rf.committedIndex = len(rf.log)-1
 			}
+		}
+		if logModified {
+			rf.persist()
 		}
 	}
 
@@ -417,7 +454,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := rf.currentTerm
 
 	rf.log = append(rf.log, Entry{command, term})
-	myDebug(rf.me, " append a cmd, now len(log)=", len(rf.log))
+	rf.persist()
+	myDebug(rf.me, " append a cmd from client, now len(log)=", len(rf.log))
 	rf.mu.Unlock()
 	go func() {
 		select {
@@ -461,6 +499,7 @@ func (rf *Raft) leaderProdecure() {
 
 		go func(i int) {
 			// this routine constantly check the nextIndex, matchIndex
+			nextIndexDecStep := 1
 			for {
 				<- appendNoticeChanList[i]
 				rf.mu.Lock()
@@ -483,8 +522,13 @@ func (rf *Raft) leaderProdecure() {
 						// myDebug(rf.me, "sending out heart beat to ", i)
 						args.Entries = nil
 					} else {
-						myDebug(rf.me, "sending out meaningful append to ", i)
-						args.Entries = rf.log[nextIndex:]
+						myDebug(rf.me, "->", i, ": meaningful append(t, pT, pI)=", 
+										args.Term, args.PrevLogTerm, args.PrevLogIndex)
+						if (nextIndex + maxAppendEntries > len(rf.log)) {
+							args.Entries = rf.log[nextIndex :]
+						} else {
+							args.Entries = rf.log[nextIndex : nextIndex + maxAppendEntries]
+						}
 					}
 					args.LeaderCommit = rf.committedIndex
 					rf.mu.Unlock()
@@ -503,10 +547,13 @@ func (rf *Raft) leaderProdecure() {
 							rf.votedFor = -1
 							rf.leader = -1
 							rf.role = Follower
+							// rf.lastLeaderTS = time.Now().UnixNano()
+							rf.persist()
 						}
 						rf.mu.Unlock()
 						return
 					} else if reply.Success {
+						nextIndexDecStep = 1
 						if args.PrevLogIndex == rf.nextIndex[i]-1 {
 							rf.nextIndex[i]+= len(args.Entries)
 						}
@@ -515,12 +562,20 @@ func (rf *Raft) leaderProdecure() {
 						}
 						ci := findCommitIndex(rf.matchIndex)
 						if ci > rf.committedIndex {
-							myDebug(rf.me, " move committedIndex to ", ci)
-							rf.committedIndex = ci
+							if rf.log[ci].Term >= rf.currentTerm {
+								myDebug(rf.me, " move committedIndex to ", ci)
+								rf.committedIndex = ci
+							}
 						}
 					} else {
 						if args.PrevLogIndex == rf.nextIndex[i]-1 {
-							rf.nextIndex[i]--
+							orig := rf.nextIndex[i]
+							rf.nextIndex[i] -= nextIndexDecStep
+							nextIndexDecStep *= 2
+							if rf.nextIndex[i] <= 0 {
+								rf.nextIndex[i] = 1
+							}
+							myDebug(rf.me, " dec nextIndex of ", i, " from ", orig, " to ", rf.nextIndex[i])
 						}
 					}
 					rf.mu.Unlock()
@@ -581,58 +636,6 @@ func (rf *Raft) leaderProdecure() {
 
 }
 
-func (rf *Raft) heartBeatProcedure() {
-	me := rf.me
-	rf.mu.Lock()
-	thisTerm := rf.currentTerm
-	rf.mu.Unlock()
-	for {
-		rf.mu.Lock()
-		role := rf.role
-		terminate := rf.terminate
-		rf.mu.Unlock()
-		if terminate {
-			return
-		}
-		if role != Leader {
-			return
-		}
-		time.Sleep(time.Duration(heartBeatDelta))
-
-		for i := 0; i < len(rf.peers); i++ {
-			if i == me {
-				continue
-			}
-			go func(i int) {
-				args := AppendEntriesArgs{}
-				args.Term = thisTerm
-				args.LeaderId = rf.me
-				args.PrevLogIndex = rf.nextIndex[i]-1
-				args.PrevLogTerm = rf.log[rf.nextIndex[i]-1].Term
-				args.Entries = nil
-				args.LeaderCommit = rf.committedIndex
-				reply := AppendEntriesReply{}
-				myDebug(rf.me, ":sending heart beat to ", i)
-				ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
-				if !ok {
-					myDebug(rf.me, ":the heart beat to ", i, " may lost")
-					return
-				}
-				if reply.Term > thisTerm {
-					rf.mu.Lock()
-					if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term
-						rf.votedFor = -1
-						rf.leader = -1
-						rf.role = Follower
-					}
-					rf.mu.Unlock()
-					return
-				}
-			} (i)
-		}
-	}
-}
 
 func (rf *Raft) electionProcedure() {
 	for {
@@ -642,21 +645,25 @@ func (rf *Raft) electionProcedure() {
 			return
 		}
 		if rf.role != Candidate {
+			myDebug(rf.me, " terminate election due to term changed by some routine else")
 			rf.mu.Unlock()
 			return
 		}
 		rf.currentTerm ++
 		thisTerm := rf.currentTerm
-		n := len(rf.peers)
 		rf.votedFor = rf.me
+		rf.persist()
 		requestVoteArgs := RequestVoteArgs{}
-		requestVoteArgs.Term = thisTerm
-		requestVoteArgs.CandidateId = rf.me
 		requestVoteArgs.LastLogIndex = len(rf.log)-1
 		requestVoteArgs.LastLogTerm = rf.log[requestVoteArgs.LastLogIndex].Term
 		rf.mu.Unlock()
+		n := len(rf.peers)
+		requestVoteArgs.Term = thisTerm
+		requestVoteArgs.CandidateId = rf.me
 		myDebug(rf.me, " electing in term ", thisTerm)
 		votesOfThisTerm := make(chan int, n-1)
+		rejectedVotesByLogOfThisTerm := make(chan int, 1)
+		rejectedVotesByLogOfThisTerm <- 0
 		
 		for i:=0; i < n; i++ {
 			if i == rf.me {
@@ -664,6 +671,7 @@ func (rf *Raft) electionProcedure() {
 			}
 			requestVoteReply := &RequestVoteReply{}
 			go func(i int) {
+				myDebug(rf.me, "->", i, " :sending vote ")
 				ok := rf.sendRequestVote(
 					i, &requestVoteArgs, requestVoteReply)
 				// should do some callback to count majority
@@ -671,26 +679,33 @@ func (rf *Raft) electionProcedure() {
 					return
 				}
 				if requestVoteReply.VoteGranted{
-					myDebug(rf.me, " receive vote from ", i, ", put to chan")
+					myDebug(rf.me, "->", i, " :recv vote grant of term", thisTerm, ", put to chan")
 					votesOfThisTerm <- i
-				} else if requestVoteReply.Term > thisTerm {
-					rf.mu.Lock()
-					if requestVoteReply.Term > rf.currentTerm {
-						myDebug(rf.me, " is stale, move from candidate in ", rf.currentTerm, " to follower in ", requestVoteReply.Term)
-						rf.role = Follower
-						rf.currentTerm = requestVoteReply.Term
-						rf.votedFor = -1
-						rf.leader = -1
+				} else {
+					if requestVoteReply.Term > thisTerm {
+						rf.mu.Lock()
+						if requestVoteReply.Term > rf.currentTerm {
+							myDebug(rf.me, " is stale, move from candidate in ", rf.currentTerm, 
+											" to follower in ", requestVoteReply.Term)
+							rf.role = Follower
+							rf.currentTerm = requestVoteReply.Term
+							rf.votedFor = -1
+							rf.lastLeaderTS = time.Now().UnixNano()
+							rf.leader = -1
+							rf.persist()
+						}
+						rf.mu.Unlock()
+					} else {
+						orig := <-rejectedVotesByLogOfThisTerm
+						rejectedVotesByLogOfThisTerm <- orig+1
 					}
-					rf.mu.Unlock()
 				}
 			} (i)
 		}
-			
 		go func() {
 			rand.Seed(time.Now().UnixNano())
-			myDebug(rf.me, " putting -1 to election count chan ")
 			time.Sleep(time.Duration(rand.Int63n(electionTimeoutRange) + electionTimeoutBase))
+			myDebug(rf.me, " election timelimit, election count chan <- -1, t=", thisTerm)
 			votesOfThisTerm <- -1
 		} ()
 
@@ -698,23 +713,32 @@ func (rf *Raft) electionProcedure() {
 		for {
 			i := <-votesOfThisTerm
 			if i == -1 {
-				myDebug(rf.me, " election timeout, reelecting")
+				myDebug(rf.me, " election term ", thisTerm, " timeout, reelecting in next term")
+				rejected := <- rejectedVotesByLogOfThisTerm
+				rejectedVotesByLogOfThisTerm <- rejected
+				if rejected > n/2 {
+					// myDebug(rf.me, " majority rejected me in this election term ", thisTerm)
+					// rf.mu.Lock()
+					// rf.lastLeaderTS = time.Now().UnixNano()
+					// rf.mu.Unlock()
+					// return
+				}
 				// election failed, reelection
 				break
 			}
 
 			voteReceived ++
-			myDebug(rf.me, " received vote from ", i)
+			myDebug(rf.me, "->", i, " recv granted vote of term", thisTerm)
 			if voteReceived >= n / 2 {
 				rf.mu.Lock()
 				// election succeed
 				if rf.currentTerm > thisTerm {
-					myDebug(rf.me, " received vote from ", i, ", but has already exist candidate")
+					myDebug(rf.me, "->", i, " recv grant vote in term ", thisTerm, ", but I've moved on")
 					// election succeed, but this server has already stale and move to next term
 					rf.mu.Unlock()
 					return
 				}
-				myDebug(rf.me, " has f+1 votes and becomes leader")
+				myDebug(rf.me, " has f+1 votes and becomes leader of term ", thisTerm)
 				rf.role = Leader
 				// start heart beat procedure
 				rf.leader = rf.me
@@ -750,7 +774,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	rf.applyChan = applyCh
+	// rf.applyChan = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.role = Follower
@@ -804,7 +828,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				applyMsg.Command = rf.log[applyMsg.CommandIndex].Data
 				rf.mu.Unlock()
 				applyMsg.CommandValid = true
-				rf.applyChan <- applyMsg
+				applyCh <- applyMsg
 			} else {
 				rf.mu.Unlock()
 				time.Sleep(time.Duration(applyCheckDelta))
