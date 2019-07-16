@@ -42,9 +42,12 @@ const heartBeatDelta int64 = 1e8
 const applyCheckDelta int64 = 2e7
 const maxAppendEntries int = 100
 
+const clientDataEntryType    int = 0
+const noopEntryType          int = 1 // not used except the first empty entry
+
 func myDebug(other ...interface{}) {
 	/*
-	fmt.Print(time.Now().String()[14:25], " ")
+	fmt.Print(time.Now().String()[14:25], " raft:")
 	fmt.Println(other...) 
 	// */
 	fmt.Print("")
@@ -70,6 +73,7 @@ type ApplyMsg struct {
 type Entry struct {
 	Data interface{}
 	Term int
+	EntryType      int // 0 for client data, 1 for noop, 2 for ...
 }
 
 // Raft :
@@ -453,7 +457,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := len(rf.log)
 	term := rf.currentTerm
 
-	rf.log = append(rf.log, Entry{command, term})
+	rf.log = append(rf.log, Entry{command, term, clientDataEntryType})
 	rf.persist()
 	myDebug(rf.me, " append a cmd from client, now len(log)=", len(rf.log))
 	rf.mu.Unlock()
@@ -646,6 +650,7 @@ func (rf *Raft) electionProcedure() {
 		}
 		if rf.role != Candidate {
 			myDebug(rf.me, " terminate election due to term changed by some routine else")
+			rf.lastLeaderTS = time.Now().UnixNano()
 			rf.mu.Unlock()
 			return
 		}
@@ -736,12 +741,14 @@ func (rf *Raft) electionProcedure() {
 					myDebug(rf.me, "->", i, " recv grant vote in term ", thisTerm, ", but I've moved on")
 					// election succeed, but this server has already stale and move to next term
 					rf.mu.Unlock()
+					rf.lastLeaderTS = time.Now().UnixNano()
 					return
 				}
 				myDebug(rf.me, " has f+1 votes and becomes leader of term ", thisTerm)
 				rf.role = Leader
 				// start heart beat procedure
 				rf.leader = rf.me
+				// rf.log = append(rf.log, Entry{nil, thisTerm, noopEntryType})
 				rf.matchIndex = make([]int, len(rf.peers))
 				rf.nextIndex = make([]int, len(rf.peers))
 				for i := 0; i < len(rf.peers); i++ {
@@ -781,7 +788,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = make([]Entry, 1)
-	rf.log[0] = Entry{nil, 0}
+	rf.log[0] = Entry{nil, 0, noopEntryType}
 	rf.committedIndex = 0
 	rf.lastApplied = 0
 	rf.lastLeaderTS = 0
@@ -822,12 +829,24 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			}
 			rf.mu.Lock()
 			if rf.committedIndex > rf.lastApplied {
-				applyMsg := ApplyMsg{}
 				rf.lastApplied ++
+				entry := &rf.log[rf.lastApplied]
+				applyMsg := ApplyMsg{}
 				applyMsg.CommandIndex = rf.lastApplied
-				applyMsg.Command = rf.log[applyMsg.CommandIndex].Data
+				applyMsg.Command = entry.Data
 				rf.mu.Unlock()
-				applyMsg.CommandValid = true
+				myDebug(rf.me, " sending apply msg of idx=", applyMsg.CommandIndex)
+
+				switch entry.EntryType {
+				case clientDataEntryType:
+					applyMsg.CommandValid = true
+				case noopEntryType:
+					// applyMsg.CommandValid = true
+					panic(" unused noop entry type")
+				default :
+					panic(" unused other entry type")
+					// applyMsg.CommandValid = false
+				}
 				applyCh <- applyMsg
 			} else {
 				rf.mu.Unlock()
