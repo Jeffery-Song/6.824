@@ -6,14 +6,32 @@ import "math/big"
 import "sync"
 import "fmt"
 
-var seqLock sync.Mutex
-var nextSequence int = 0
+// var seqLock sync.Mutex
+// var nextSequence int = 0
 
-func genSeq() int {
-	seqLock.Lock()
-	seq := nextSequence
-	nextSequence++
-	seqLock.Unlock()
+// func genSeq() int {
+// 	seqLock.Lock()
+// 	seq := nextSequence
+// 	nextSequence++
+// 	seqLock.Unlock()
+// 	return seq
+// }
+
+// type Clerk struct {
+// 	servers []*labrpc.ClientEnd
+// 	// You will have to modify this struct.
+// 	lastRemLeader int
+// 	// nextSequence int
+// 	mu      sync.Mutex
+// }
+
+
+
+func (ck *Clerk)genSeq() int {
+	ck.seqLock.Lock()
+	seq := ck.nextSequence
+	ck.nextSequence++
+	ck.seqLock.Unlock()
 	return seq
 }
 
@@ -22,7 +40,10 @@ type Clerk struct {
 	// You will have to modify this struct.
 	lastRemLeader int
 	// nextSequence int
-	mu      sync.Mutex
+	mu           sync.Mutex
+	seqLock      sync.Mutex
+	nextSequence int
+	me           int64
 }
 
 func nrand() int64 {
@@ -36,7 +57,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	ck.lastRemLeader = 0
-	// ck.nextSequence = 0
+	ck.nextSequence = 0
+	ck.me = nrand()
+	// println("creating a new ck,", ck.me)
 	// You'll have to add code here.
 	return ck
 }
@@ -56,12 +79,13 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	seq := genSeq()
+	seq := ck.genSeq()
 	dest := ck.lastRemLeader
 	for {
 		args := GetArgs{}
 		args.Sequence = seq
 		args.Key = key
+		args.ClientId = ck.me
 		reply := GetReply{}
 		myDebug("client sending get to ", dest, ", key=\""+fmt.Sprint(key)+"\", seq=" + fmt.Sprint(seq))
 
@@ -108,7 +132,7 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	seq := genSeq()
+	seq := ck.genSeq()
 	dest := ck.lastRemLeader
 	for {
 		args := PutAppendArgs{}
@@ -116,6 +140,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		args.Key = key
 		args.Value = value
 		args.Op = op
+		args.ClientId = ck.me
 		reply := GetReply{}
 		myDebug("client sending putappend to ", dest, ", op=" + op + ", key=\""+key+"\", val=\"" + value + "\", seq=" + fmt.Sprint(seq))
 		ok := ck.servers[dest].Call("KVServer.PutAppend", &args, &reply)
