@@ -8,10 +8,22 @@ import "labrpc"
 import "time"
 import "crypto/rand"
 import "math/big"
+import "sync"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	mu           sync.Mutex
+	seqLock      sync.Mutex
+	nextSequence int
+	me           int64
+}
+func (ck *Clerk)genSeq() int {
+	ck.seqLock.Lock()
+	seq := ck.nextSequence
+	ck.nextSequence++
+	ck.seqLock.Unlock()
+	return seq
 }
 
 func nrand() int64 {
@@ -25,19 +37,24 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.nextSequence = 0
+	ck.me = nrand()
 	return ck
 }
 
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
-	// Your code here.
-	args.Num = num
+	seq := ck.genSeq()
 	for {
+		args := &QueryArgs{}
+		// Your code here.
+		args.Sequence = seq
+		args.Num = num
+		args.ClientId = ck.me
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply QueryReply
 			ok := srv.Call("ShardMaster.Query", args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && reply.WrongLeader == false && reply.Err == "" {
 				return reply.Config
 			}
 		}
@@ -46,11 +63,14 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
-	// Your code here.
-	args.Servers = servers
+	seq := ck.genSeq()
 
 	for {
+		args := &JoinArgs{}
+		args.Sequence = seq
+		args.ClientId = ck.me
+		// Your code here.
+		args.Servers = servers
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply JoinReply
@@ -64,11 +84,14 @@ func (ck *Clerk) Join(servers map[int][]string) {
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
-	// Your code here.
-	args.GIDs = gids
+	seq := ck.genSeq()
 
 	for {
+		args := &LeaveArgs{}
+		args.Sequence = seq
+		args.ClientId = ck.me
+		// Your code here.
+		args.GIDs = gids
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply LeaveReply
@@ -82,12 +105,15 @@ func (ck *Clerk) Leave(gids []int) {
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
-	// Your code here.
-	args.Shard = shard
-	args.GID = gid
+	seq := ck.genSeq()
 
 	for {
+		args := &MoveArgs{}
+		args.Sequence = seq
+		args.ClientId = ck.me
+		// Your code here.
+		args.Shard = shard
+		args.GID = gid
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply MoveReply
