@@ -13,6 +13,7 @@ import "crypto/rand"
 import "math/big"
 import "shardmaster"
 import "time"
+import "sync"
 
 //
 // which shard is a key in?
@@ -40,6 +41,17 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	seqLock      sync.Mutex
+	nextSequence int
+	me           int64
+}
+
+func (ck *Clerk)genSeq() int {
+	ck.seqLock.Lock()
+	seq := ck.nextSequence
+	ck.nextSequence++
+	ck.seqLock.Unlock()
+	return seq
 }
 
 //
@@ -56,6 +68,8 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.nextSequence = 0
+	ck.me = nrand()
 	return ck
 }
 
@@ -66,15 +80,18 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{}
-	args.Key = key
-
+	seq := ck.genSeq()
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
+				args := GetArgs{}
+				args.Key = key
+				args.Sequence = seq
+				args.ClientId = ck.me
+				args.Shard = shard
 				srv := ck.make_end(servers[si])
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
@@ -90,7 +107,6 @@ func (ck *Clerk) Get(key string) string {
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
-
 	return ""
 }
 
@@ -99,17 +115,19 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{}
-	args.Key = key
-	args.Value = value
-	args.Op = op
-
-
+	seq := ck.genSeq()
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
+				args := PutAppendArgs{}
+				args.Key = key
+				args.Value = value
+				args.Op = op
+				args.Sequence = seq
+				args.ClientId = ck.me
+				args.Shard = shard
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
