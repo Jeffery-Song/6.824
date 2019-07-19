@@ -116,6 +116,20 @@ func (kv *KVServer) recoverSnapshot(b []byte) {
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	kv.mu.Lock()
+	if kv.isExecuted(args.ClientId, args.Sequence) {
+		value, exist := kv.database[args.Key]
+		kv.mu.Unlock()
+		_, isLeader := kv.rf.GetState()
+		reply.WrongLeader = !isLeader
+		if !exist {
+			value = ""
+		}
+		reply.Value = value
+		reply.Err = ""
+		return
+	}
+	kv.mu.Unlock()
 	op := Op{}
 	op.Sequence = args.Sequence // not used for readonly txn
 	op.Key = args.Key
@@ -144,6 +158,15 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	if kv.isExecuted(args.ClientId, args.Sequence) {
+		kv.mu.Unlock()
+		reply.Err = ""
+		_, isLeader := kv.rf.GetState()
+		reply.WrongLeader = !isLeader
+		return
+	}
+	kv.mu.Unlock()
 	op := Op{}
 	op.Sequence = args.Sequence // not used for readonly txn
 	op.Key = args.Key
@@ -187,7 +210,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+	kv.mu.Lock()
 	kv.terminate = true
+	kv.mu.Unlock()
 	go func() {
 		kv.applyCh <- raft.ApplyMsg{}
 	} ()
@@ -284,10 +309,13 @@ func applyRoutine(kv *KVServer) {
 		var applyMsg raft.ApplyMsg
 		select {
 		case applyMsg = <- kv.applyCh:
+			kv.mu.Lock()
 			if kv.terminate == true {
+				kv.mu.Unlock()
 				myDebug(kv.me, " : exiting")
 				return
 			}
+			kv.mu.Unlock()
 			if applyMsg.CommandValid == true {
 				op, opOk := applyMsg.Command.(Op)
 				if !opOk {
@@ -297,6 +325,7 @@ func applyRoutine(kv *KVServer) {
 				myDebug(kv.me, " :found a committed op, idx=", op.String(), applyMsg.CommandIndex)
 				val := "" // for potential get
 				// whether executed, they all need reply
+				kv.mu.Lock()
 				if kv.isExecuted(op.ClientId, op.Sequence) {
 					// reply of read need the value
 					if op.Operation == 0 {//get
@@ -315,9 +344,12 @@ func applyRoutine(kv *KVServer) {
 					// send it to raft
 					kv.rf.DoSnapshot(kvsnapshot, applyMsg.CommandIndex)
 				}
+				kv.mu.Unlock()
 			} else {
 				// installed snapshot from other one
+				kv.mu.Lock()
 				kv.recoverSnapshot(applyMsg.Snapshot)
+				kv.mu.Unlock()
 				kv.onGoingCtxsMutex.Lock()
 				for idx, ctx := range kv.onGoingCtxs {
 					myDebug(kv.me, "clearing ongoing ctx due to new installed snapshot: idx,seq=", idx, ctx.seq)

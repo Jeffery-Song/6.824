@@ -463,7 +463,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 	} else {
 		if len(args.Entries) != 0 {
-			myDebug(rf.me, "<-", args.LeaderId, " :accept append some entries")
+			myDebug(rf.me, "<-", args.LeaderId, " :accept append some entries, len,lastTerm=", len(args.Entries), args.Entries[len(args.Entries)-1].Term)
 		}
 		// now update local entries
 		nextEntryToPut := 0
@@ -486,6 +486,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			logModified = true
 		}
 		reply.Success = true
+		if len(args.Entries) != 0 {
+			myDebug(rf.me, "<-", args.LeaderId, " :after appending, the lastidx,lastterm=", rf.logLength()-1, rf.getTerm(rf.logLength()-1))
+		}
 		if args.LeaderCommit > rf.committedIndex {
 			if args.LeaderCommit < rf.logLength() - 1 {
 				myDebug(rf.me, " catch up committedIndex to ", args.LeaderCommit)
@@ -493,6 +496,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			} else {
 				myDebug(rf.me, " catch up committedIndex to ", rf.logLength()-1)
 				rf.committedIndex = rf.logLength() - 1
+			}
+		} else {
+			if len(args.Entries) != 0 {
+				myDebug(rf.me, "<-", args.LeaderId, " :after appending, cmtIdx remains. leadercommit,cmtIdx=", args.LeaderCommit, rf.committedIndex)
 			}
 		}
 		if logModified {
@@ -718,13 +725,16 @@ func (rf *Raft) prepareAppendEntriesArgs(i int) *AppendEntriesArgs {
 		// myDebug(rf.me, "sending out heart beat to ", i)
 		args.Entries = nil
 	} else {
-		myDebug(rf.me, "->", i, ": meaningful append(t, pT, pI)=", 
-						args.Term, args.PrevLogTerm, args.PrevLogIndex)
+		myDebug(rf.me, "->", i, ": meaningful append(t, pT, pI, leaderCmt)=", 
+						args.Term, args.PrevLogTerm, args.PrevLogIndex, rf.committedIndex)
 		if (rf.nextIndex[i] + maxAppendEntries > rf.logLength()) {
 			args.Entries = rf.getLogSlice(rf.nextIndex[i], -1)
 		} else {
 			args.Entries = rf.getLogSlice(rf.nextIndex[i], rf.nextIndex[i] + maxAppendEntries)
 		}
+		myDebug(rf.me, "->", i, ": meaningful append(t, pT, pI, leaderCmt,lastI,lastT)=", 
+						args.Term, args.PrevLogTerm, args.PrevLogIndex, rf.committedIndex,
+						rf.nextIndex[i]+len(args.Entries)-1, args.Entries[len(args.Entries)-1].Term)
 	}
 	args.LeaderCommit = rf.committedIndex
 	return &args
@@ -1111,11 +1121,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				continue
 			}
 			now := time.Now().UnixNano()
+			rf.mu.Lock()
 			if now - rf.lastLeaderTS > leaderStepDownDelta {
 				myDebug(rf.me, " thinks leader is down, start election")
 				// start election
 				rf.role = Candidate
+				rf.mu.Unlock()
 				rf.electionProcedure()
+			} else {
+				rf.mu.Unlock()
 			}
 		}
 	} ()
@@ -1126,10 +1140,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func applyRoutine(rf *Raft, applyCh chan ApplyMsg) {
 	for {
+		rf.mu.Lock()
 		if rf.terminate {
+			rf.mu.Unlock()
 			return
 		}
-		rf.mu.Lock()
+		// rf.mu.Unlock()
+		// rf.mu.Lock()
 		if rf.newSnapshotInstalled {
 			if rf.lastApplied < rf.lastIndexInSnapshot {
 				panic("some log in snapshot is not applied")
@@ -1160,6 +1177,7 @@ func applyRoutine(rf *Raft, applyCh chan ApplyMsg) {
 			applyMsg.PersistStateSize = rf.persister.RaftStateSize()
 			rf.mu.Unlock()
 			myDebug(rf.me, " sending apply msg of idx=", applyMsg.CommandIndex)
+			// println(rf.me, " sending apply msg of idx=", applyMsg.CommandIndex)
 
 			switch entry.EntryType {
 			case clientDataEntryType:
