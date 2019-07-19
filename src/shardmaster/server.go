@@ -287,7 +287,9 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 //
 func (sm *ShardMaster) Kill() {
 	sm.rf.Kill()
+	sm.mu.Lock()
 	sm.terminate = true
+	sm.mu.Unlock()
 	go func() {
 		sm.applyCh <- raft.ApplyMsg{}
 	}()
@@ -315,6 +317,7 @@ func (sm *ShardMaster) executeOp(op Op) (int, string) {
 		}
 		sm.rebalance(newConfig, lastConfig)
 		sm.configs = append(sm.configs, *newConfig)
+		myDebug(sm.me, "after join, config is", newConfig.Shards)
 	case opLeave:
 		args := op.Args.(*LeaveArgs)
 		lastConfig := &sm.configs[len(sm.configs)-1]
@@ -333,6 +336,7 @@ func (sm *ShardMaster) executeOp(op Op) (int, string) {
 		}
 		sm.rebalance(newConfig, lastConfig)
 		sm.configs = append(sm.configs, *newConfig)
+		myDebug(sm.me, "after leave, config is", newConfig.Shards)
 	case opMove:
 		args := op.Args.(*MoveArgs)
 		lastConfig := &sm.configs[len(sm.configs)-1]
@@ -348,6 +352,7 @@ func (sm *ShardMaster) executeOp(op Op) (int, string) {
 		newConfig.Shards = lastConfig.Shards
 		newConfig.Shards[args.Shard] = args.GID
 		sm.configs = append(sm.configs, *newConfig)
+		myDebug(sm.me, "after move, config is", newConfig.Shards)
 	case opQuery:
 		args := op.Args.(*QueryArgs)
 		if args.Num == -1 || args.Num >= len(sm.configs) {
@@ -446,10 +451,13 @@ func applyRoutine(sm *ShardMaster) {
 		var applyMsg raft.ApplyMsg
 		select {
 		case applyMsg = <-sm.applyCh:
+			sm.mu.Lock()
 			if sm.terminate == true {
+				sm.mu.Unlock()
 				myDebug(sm.me, " : exiting")
 				return
 			}
+			sm.mu.Unlock()
 			if applyMsg.CommandValid == true {
 				op, opOk := applyMsg.Command.(Op)
 				if !opOk {
@@ -512,6 +520,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	labgob.Register(&LeaveArgs{})
 	labgob.Register(&MoveArgs{})
 	labgob.Register(&QueryArgs{})
+	labgob.Register(Config{})
 	sm.applyCh = make(chan raft.ApplyMsg)
 	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
 
